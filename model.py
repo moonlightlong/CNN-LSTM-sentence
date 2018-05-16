@@ -13,11 +13,32 @@ from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Flatten, Input
 from keras.layers import MaxPooling1D, Convolution1D, Embedding
 from keras.layers import LSTM, Bidirectional
+from keras.layers import GlobalAveragePooling1D, GlobalMaxPool1D
 from keras.layers.merge import Concatenate
 from keras.datasets import imdb
 from keras.preprocessing import sequence
 
 import keras.backend as K
+from keras.callbacks import Callback
+from sklearn.metrics import f1_score, precision_score, recall_score
+
+# callback
+class Metrics(Callback):
+    def on_train_begin(self, logs={}):
+        self.val_f1s = []
+        self.val_recalls = []
+        self.val_precisions = []
+
+    def on_epoch_end(self, epoch, logs={}):
+        val_predict = (np.asarray(self.model.predict(self.validation_data[0]))).round()
+        val_targ = self.validation_data[1]
+        _val_f1 = f1_score(val_targ, val_predict)
+        _val_recall = recall_score(val_targ, val_predict)
+        _val_precision = precision_score(val_targ, val_predict)
+
+        self.val_f1s.append(_val_f1)
+        self.val_recalls.append(_val_recall)
+        self.val_precisions.append(_val_precision)
 
 # model
 class LSTM_CNN_Model(object):
@@ -34,13 +55,12 @@ class LSTM_CNN_Model(object):
         self.embedding_dim = conf.embedding_dim
         self.filter_sizes = (3, 8)
         self.num_filters = conf.num_filters
-        self.dropout_prob = (0.5, 0.8)
+        self.dropout_prob = (0.5, 0.3, 0.8)
         self.hidden_dims = 50
 
         # 设置训练参数
         self.batch_size = conf.batch_size
         self.num_epochs = conf.num_epochs
-        self.flags = False
 
         # 设置预处理参数
         self.sequence_length = conf.sequence_length
@@ -56,7 +76,7 @@ class LSTM_CNN_Model(object):
         # 读取数据
         print("=" * 120)
         print("Load data...")
-        self.x_train, self.y_train, self.x_dev, self.y_dev, self.x_test, self.y_test, self.vocabulary_inv = self.load_data()
+        self.x_train, self.y_train, self.x_test, self.y_test, self.vocabulary_inv = self.load_data()
         
         if self.sequence_length != self.x_test.shape[1]:
             print("Adjusting sequence length for actual size")
@@ -98,35 +118,29 @@ class LSTM_CNN_Model(object):
             shuffle_indices = np.random.permutation(np.arange(len(y)))
             x = x[shuffle_indices]
             y = y[shuffle_indices]
-            train_len = int(len(x) * 0.7)
+            train_len = int(len(x) * 0.9)
             x_train = x[:train_len]
             y_train = y[:train_len]
             x_test = x[train_len:]
             y_test = y[train_len:]
-        shuffle_ind = np.random.permutation(np.arange(len(y_test)))
-        x_test = x_test[shuffle_ind]
-        y_test = y_test[shuffle_ind]
-        test_len = int(len(y_test) * 0.5)
-        x_dev = x_test[:test_len]
-        y_dev = y_test[:test_len]
-        x_test = x_test[test_len:]
-        y_test = y_test[test_len:]
 
-        return x_train, y_train, x_dev, y_dev, x_test, y_test, vocabulary_inv
+        return x_train, y_train, x_test, y_test, vocabulary_inv
 
-    def build_model(self, flags=False):
+    def build_model(self):
         print("=" * 120)
         print("Model type is", self.model_type)
         if self.model_type in ["non-static", "static"]:
-            embedding_weights = train_word2vec(np.vstack((self.x_train, self.x_test)), self.vocabulary_inv, num_features=self.embedding_dim,
-                                            min_word_count=self.min_word_count, context=self.context)
+            embedding_weights = train_word2vec(self.data_source,
+                                               np.vstack((self.x_train, self.x_test)),
+                                               self.vocabulary_inv,
+                                               num_features=self.embedding_dim,
+                                                min_word_count=self.min_word_count,
+                                                context=self.context)
             if self.model_type == "static":
                 self.x_train = np.stack([np.stack([embedding_weights[word] for word in sentence]) for sentence in self.x_train])
                 self.x_test = np.stack([np.stack([embedding_weights[word] for word in sentence]) for sentence in self.x_test])
-                self.x_dev = np.stack([np.stack([embedding_weights[word] for word in sentence]) for sentence in self.x_dev])
                 print("x_train static shape:", self.x_train.shape)
                 print("x_test static shape:", self.x_test.shape)
-                print("x_test static shape:", self.x_dev.shape)
 
         elif self.model_type == "rand":
             embedding_weights = None
@@ -158,50 +172,27 @@ class LSTM_CNN_Model(object):
                                 kernel_size=sz,
                                 padding="valid",
                                 activation="relu",
+                                use_bias=True,
+                                bias_initializer='zeros',
                                 strides=1)(z)
             conv = MaxPooling1D(pool_size=2)(convo)
-            conv_lstm = MaxPooling1D(pool_size=4)(convo)
-            lstm = Bidirectional(LSTM(self.hidden_dims),
-                                 input_shape=(int((self.sequence_length-sz+1)/4), self.num_filters))(conv_lstm)
+            lstm = Bidirectional(LSTM(self.hidden_dims, dropout=self.dropout_prob[1]),
+                                 input_shape=(int((self.sequence_length-sz+1)/2), self.num_filters))(conv)
             conv = Flatten()(conv)
-            conv_blocks.append(conv)
+            conv_blocks.append(conv)           
 
             lstm_blocks.append(lstm)
         z = Concatenate()(conv_blocks) if len(conv_blocks) > 1 else conv_blocks[0]
         l = Concatenate()(lstm_blocks) if len(lstm_blocks) > 1 else lstm_blocks[0]
 
-        z = Dropout(self.dropout_prob[1])(z)
+        z = Dropout(self.dropout_prob[2])(z)
         z = Dense(self.hidden_dims, activation="relu")(z)
         z = Concatenate()([z, l])
+        # z = l
         model_output = Dense(1, activation="sigmoid")(z)
 
         self.model = Model(model_input, model_output)
-
-        def recall(y_true, y_pred):
-            true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-            possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
-
-            recall = true_positives / (possible_positives + K.epsilon())
-            return recall
-
-        def precision(y_true, y_pred):
-            true_posotives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-            predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
-            precision = true_posotives / (predicted_positives + K.epsilon())
-            return precision
-
-        def f1(y_true, y_pred):
-            pre = precision(y_true, y_pred)
-            rec = recall(y_true, y_pred)
-            return 2 * ((pre * rec)/(pre+rec+K.epsilon()))
-
-        if flags == False:
-            self.model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
-        else:
-            self.flags = True
-            self.model.compile(loss="binary_crossentropy",
-                               optimizer="adam",
-                               metrics=[precision, recall, f1])
+        self.model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
 
         # 使用word2vec 初始化 权值
         if self.model_type == "non-static":
@@ -214,25 +205,12 @@ class LSTM_CNN_Model(object):
         """训练模型
         """
         print("=" * 120)
-        if self.flags == False:
-            history = self.model.fit(self.x_train,
-                                     self.y_train,
-                                     batch_size=self.batch_size,
-                                     epochs=self.num_epochs,
-                                     validation_data=(self.x_dev, self.y_dev))
-        else:
-            history = self.model.fit(self.x_train,
-                                     self.y_train,
-                                     batch_size=self.batch_size,
-                                     epochs=self.num_epochs,
-                                     validation_data=(self.x_dev, self.y_dev))
-        return history
-            
-
-    def evaluate(self):
-        """预测，获得准确度
-        """
-        print("=" * 120)
-        score, acc = self.model.evaluate(self.x_test, self.y_test, batch_size=self.batch_size)
-        print("Test score:", score)
-        print("Test accuracy:", acc)
+        metrices = Metrics()
+        history = self.model.fit(self.x_train,
+                                    self.y_train,
+                                    batch_size=self.batch_size,
+                                    epochs=self.num_epochs,
+                                    shuffle=True,
+                                    callbacks=[metrices],
+                                    validation_data=(self.x_test, self.y_test))
+        return history, metrices

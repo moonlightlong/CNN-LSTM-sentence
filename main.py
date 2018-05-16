@@ -9,6 +9,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import model
 import argparse
+import matplotlib.pyplot as plt
 
 parser = argparse.ArgumentParser(description="LSTM_CNN model")
 
@@ -41,20 +42,53 @@ parser.add_argument('--lstm_output_dim', type=int, default=50)
 # 输出已设置的参数
 conf = parser.parse_args()
 
-# 输出参数
-print("")
-print("#" * 210)
-print("Parameters:")
-print(conf)
-print("")
+# #########################################################################
+# 训练
+# #########################################################################
+data_sets = ["MR", "CHNSENTICORP"]
+history_dict = {}
+metrics_dict = {}
+for data_name in data_sets:
+    conf.data_source = data_name
+    model_type_list = ["rand", "static", "non-static"]
+    for model_type in model_type_list:
+        conf.model_type = model_type
 
-lstm_cnn = model.LSTM_CNN_Model(conf)
+        # if model_type == "rand":
+        #     os.remove('./models/50features_1minwords_10context')
+        
+        # 输出参数
+        print("")
+        print("#" * 210)
+        print(data_name + model_type)
+        print("Parameters:")
+        print(conf)
+        print("")
 
-lstm_cnn.fit()
+        lcmodel = model.LSTM_CNN_Model(conf)
+        imdb_h, metrics = lcmodel.fit()
+        history_dict[data_name + model_type] = imdb_h
+        metrics_dict[data_name + model_type] = metrics
 
-lstm_cnn.evaluate()
-print("")
-print("#" * 210)
-print(lstm_cnn.model.summary())
-from keras.utils import plot_model
-plot_model(lstm_cnn.model, to_file='model.png')
+        if data_name + model_type == "MRrand":
+            from keras.utils import plot_model
+            plot_model(lcmodel.model, to_file='model.png')
+        
+        if data_name + model_type in ["MRnon-static", "CHNSENTICORPnon-static"]:
+            print("")
+            print(lcmodel.model.summary())
+
+for f in metrics_dict.keys().sort():
+    print(f + ":")
+    print("precision:" + max(metrics_dict[f].val_precisions))
+
+import matplotlib.pyplot as plt
+
+filename = []
+for file in history_dict.keys().sort():
+    plt.plot(history_dict[file].history["val_acc"])
+    filename.append(file)
+plt.ylabel('accuracy')
+plt.xlabel('epoch')
+plt.legend(filename, loc='upper left')
+plt.show()
